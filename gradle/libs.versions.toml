@@ -1,5 +1,7 @@
 [versions]
 agp = "9.2.1"
+kotlin = "2.1.0"
+djiSdkV5 = "5.18.0"
 coreKtx = "1.19.0"
 junit = "4.13.2"
 junitVersion = "1.3.0"
@@ -8,8 +10,13 @@ appcompat = "1.6.1"
 material = "1.10.0"
 activityKtx = "1.13.0"
 constraintlayout = "2.1.4"
+okhttp3 = "4.12.0"
+coroutines = "1.7.3"
 
 [libraries]
+dji-aircraft = { group = "com.dji", name = "dji-sdk-v5-aircraft", version.ref = "djiSdkV5" }
+dji-aircraft-provided = { group = "com.dji", name = "dji-sdk-v5-aircraft-provided", version.ref = "djiSdkV5" }
+dji-network-imp = { group = "com.dji", name = "dji-sdk-v5-networkImp", version.ref = "djiSdkV5" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
@@ -18,7 +25,10 @@ androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 androidx-activity-ktx = { group = "androidx.activity", name = "activity-ktx", version.ref = "activityKtx" }
 androidx-constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
+okhttp3 = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp3" }
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 

@@ -8,8 +8,8 @@
         <option name="externalProjectPath" value="$PROJECT_DIR$" />
         <option name="modules">
           <set>
-            <option value="$PROJECT_DIR$" />
-            <option value="$PROJECT_DIR$/app" />
+            <option value="$PROJECT_DIR$/../../../포빅아/B2조_AI_프로젝트/Thirds" />
+            <option value="$PROJECT_DIR$/../../../포빅아/B2조_AI_프로젝트/Thirds/app" />
           </set>
         </option>
       </GradleProjectSettings>
