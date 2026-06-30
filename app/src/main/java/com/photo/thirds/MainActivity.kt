@@ -39,8 +39,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     companion object {
         private const val TAG = "ThirdsApp"
-        const val SERVER_URL = "http://192.168.0.5:8000/detect-image"
+        private const val SERVER_BASE = "http://192.168.0.5:8000"
         private const val FRAME_INTERVAL_MS = 400L
+        private const val NIMA_INTERVAL_MS = 1000L
         private const val TARGET_WIDTH = 640
     }
 
@@ -48,6 +49,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private lateinit var surfaceView: SurfaceView
     private lateinit var overlayView: OverlayView
     private lateinit var tvStatus: TextView
+    private lateinit var tvNimaScore: TextView
     private lateinit var btnDetect: Button
 
     // ── Surface state ──────────────────────────────────────────────────────
@@ -56,10 +58,19 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private var surfaceHeight = 0
     private var isDroneConnected = false
 
-    // ── Detection state ────────────────────────────────────────────────────
+    // ── YOLO state ─────────────────────────────────────────────────────────
     private val isDetecting = AtomicBoolean(false)
     private val inFlight = AtomicBoolean(false)
     private var lastSentMs = 0L
+
+    // ── NIMA state ─────────────────────────────────────────────────────────
+    private val isNimaRunning = AtomicBoolean(false)
+    private val nimaInFlight = AtomicBoolean(false)
+    private var nimaLastSentMs = 0L
+
+    // JPEG 캐시: YOLO 인코딩 결과를 NIMA가 재사용 (600ms 이내)
+    @Volatile private var cachedJpeg: ByteArray? = null
+    @Volatile private var cachedJpegMs: Long = 0L
 
     // ── Networking ─────────────────────────────────────────────────────────
     private val ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -74,30 +85,54 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             frameData, offset, length, frameW, frameH, format ->
         Log.d(TAG, "Frame: ${frameW}x${frameH} fmt=$format len=$length ts=${System.currentTimeMillis()}")
 
-        if (!isDetecting.get()) return@CameraFrameListener
+        val yoloWants = isDetecting.get()
+        val nimaWants = isNimaRunning.get()
+        if (!yoloWants && !nimaWants) return@CameraFrameListener
+
         val now = System.currentTimeMillis()
-        if (now - lastSentMs < FRAME_INTERVAL_MS) return@CameraFrameListener
-        if (!inFlight.compareAndSet(false, true)) return@CameraFrameListener
-        lastSentMs = now
 
-        // Copy frame data: DJI may reuse the buffer after callback returns
-        val copy = frameData.copyOfRange(offset, offset + length)
-        val fw = frameW
-        val fh = frameH
-
-        ioScope.launch {
-            try {
-                val jpegBytes = nv21ToJpeg(copy, fw, fh)
-                val detections = sendFrame(jpegBytes)
-                if (isDetecting.get()) {
-                    withContext(Dispatchers.Main) {
-                        overlayView.setDetections(detections)
+        // ── YOLO 게이트 ────────────────────────────────────────────────────
+        if (yoloWants && now - lastSentMs >= FRAME_INTERVAL_MS
+                && inFlight.compareAndSet(false, true)) {
+            lastSentMs = now
+            val copy = frameData.copyOfRange(offset, offset + length)
+            val fw = frameW; val fh = frameH
+            ioScope.launch {
+                try {
+                    val jpegBytes = nv21ToJpeg(copy, fw, fh)
+                    cachedJpeg = jpegBytes
+                    cachedJpegMs = System.currentTimeMillis()
+                    val detections = sendFrame(jpegBytes)
+                    if (isDetecting.get()) {
+                        withContext(Dispatchers.Main) { overlayView.setDetections(detections) }
                     }
+                } catch (e: Exception) {
+                    Log.e(TAG, "YOLO error: $e")
+                } finally {
+                    inFlight.set(false)
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Detection pipeline error: $e")
-            } finally {
-                inFlight.set(false)
+            }
+        }
+
+        // ── NIMA 게이트 (YOLO와 독립) ──────────────────────────────────────
+        if (nimaWants && now - nimaLastSentMs >= NIMA_INTERVAL_MS
+                && nimaInFlight.compareAndSet(false, true)) {
+            nimaLastSentMs = now
+            val existingJpeg = cachedJpeg?.takeIf { now - cachedJpegMs < 600 }
+            val rawCopy = if (existingJpeg == null) frameData.copyOfRange(offset, offset + length) else null
+            val fw = frameW; val fh = frameH
+            ioScope.launch {
+                try {
+                    val jpeg = existingJpeg ?: nv21ToJpeg(rawCopy!!, fw, fh)
+                    val score = sendNimaFrame(jpeg)
+                    withContext(Dispatchers.Main) {
+                        if (score != null) tvNimaScore.text = "%.2f".format(score)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "NIMA error: $e")
+                } finally {
+                    nimaInFlight.set(false)
+                }
             }
         }
     }
@@ -108,13 +143,13 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        surfaceView = findViewById(R.id.sv_fpv)
-        overlayView = findViewById(R.id.overlay)
-        tvStatus    = findViewById(R.id.tv_status)
-        btnDetect   = findViewById(R.id.btn_detect)
+        surfaceView  = findViewById(R.id.sv_fpv)
+        overlayView  = findViewById(R.id.overlay)
+        tvStatus     = findViewById(R.id.tv_status)
+        tvNimaScore  = findViewById(R.id.tv_nima_score)
+        btnDetect    = findViewById(R.id.btn_detect)
 
         surfaceView.holder.addCallback(this)
-
         btnDetect.setOnClickListener { toggleDetection() }
 
         initDjiSdk()
@@ -123,11 +158,13 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     override fun onPause() {
         super.onPause()
         stopDetection()
+        isNimaRunning.set(false)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         stopDetection()
+        isNimaRunning.set(false)
         if (isDroneConnected) {
             MediaDataCenter.getInstance().cameraStreamManager.removeFrameListener(frameListener)
             surface?.let {
@@ -206,6 +243,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             override fun onProductConnect(productId: Int) {
                 Log.d(TAG, "Drone connected, productId=$productId")
                 isDroneConnected = true
+                isNimaRunning.set(true)
                 MediaDataCenter.getInstance().cameraStreamManager
                     .addFrameListener(ComponentIndexType.LEFT_OR_MAIN, ICameraStreamManager.FrameFormat.NV21, frameListener)
                 runOnUiThread {
@@ -218,6 +256,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             override fun onProductDisconnect(productId: Int) {
                 Log.d(TAG, "Drone disconnected, productId=$productId")
                 isDroneConnected = false
+                isNimaRunning.set(false)
                 stopDetection()
                 MediaDataCenter.getInstance().cameraStreamManager.removeFrameListener(frameListener)
                 surface?.let {
@@ -225,6 +264,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 }
                 runOnUiThread {
                     tvStatus.text = "드론 연결 해제"
+                    tvNimaScore.text = "--"
                     btnDetect.isEnabled = false
                 }
             }
@@ -270,7 +310,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         return out.toByteArray()
     }
 
-    // ── Network ────────────────────────────────────────────────────────────
+    // ── YOLO network ───────────────────────────────────────────────────────
 
     private fun sendFrame(jpegBytes: ByteArray): List<Detection> {
         val body = MultipartBody.Builder()
@@ -282,13 +322,13 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             .build()
 
         val request = Request.Builder()
-            .url(SERVER_URL)
+            .url("$SERVER_BASE/detect-image")
             .post(body)
             .build()
 
         val response = httpClient.newCall(request).execute()
         if (!response.isSuccessful) {
-            Log.w(TAG, "Server error: ${response.code}")
+            Log.w(TAG, "YOLO server error: ${response.code}")
             return emptyList()
         }
 
@@ -309,12 +349,45 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                     cx         = bbox.getDouble(0).toFloat(),
                     cy         = bbox.getDouble(1).toFloat(),
                     w          = bbox.getDouble(2).toFloat(),
-                    h          = bbox.getDouble(3).toFloat()
+                    h          = bbox.getDouble(3).toFloat(),
+                    color      = obj.optString("color", "#34C759"),
+                    isPerson   = obj.optBoolean("is_person", false)
                 )
             }
         } catch (e: Exception) {
             Log.e(TAG, "JSON parse error: $e")
             emptyList()
+        }
+    }
+
+    // ── NIMA network ───────────────────────────────────────────────────────
+
+    private fun sendNimaFrame(jpegBytes: ByteArray): Float? {
+        val body = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart(
+                "image", "frame.jpg",
+                jpegBytes.toRequestBody("image/jpeg".toMediaType())
+            )
+            .build()
+
+        val request = Request.Builder()
+            .url("$SERVER_BASE/nima-score")
+            .post(body)
+            .build()
+
+        val response = httpClient.newCall(request).execute()
+        if (!response.isSuccessful) {
+            Log.w(TAG, "NIMA server error: ${response.code}")
+            return null
+        }
+
+        return try {
+            JSONObject(response.body?.string() ?: return null)
+                .getDouble("score").toFloat()
+        } catch (e: Exception) {
+            Log.e(TAG, "NIMA JSON parse error: $e")
+            null
         }
     }
 }
