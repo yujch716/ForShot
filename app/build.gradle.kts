@@ -24,6 +24,11 @@ android {
 
         manifestPlaceholders["DJI_API_KEY"] = localProps.getProperty("DJI_API_KEY", "")
 
+        buildConfigField(
+            "String", "AI_SERVER_URL",
+            "\"${localProps.getProperty("AI_SERVER_URL", "http://192.168.0.11:8000")}\""
+        )
+
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
@@ -33,6 +38,10 @@ android {
         release {
             isMinifyEnabled = false
         }
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     compileOptions {

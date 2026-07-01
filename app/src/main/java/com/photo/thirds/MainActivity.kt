@@ -7,15 +7,28 @@ import android.graphics.Rect
 import android.graphics.YuvImage
 import android.os.Bundle
 import android.util.Log
+import android.view.GestureDetector
+import android.view.MotionEvent
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.widget.Button
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import com.google.android.material.floatingactionbutton.FloatingActionButton
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import dji.sdk.keyvalue.key.CameraKey
+import dji.sdk.keyvalue.key.KeyTools
+import dji.sdk.keyvalue.value.common.CameraLensType
 import dji.sdk.keyvalue.value.common.ComponentIndexType
+import dji.sdk.keyvalue.value.common.DoublePoint2D
+import dji.v5.common.callback.CommonCallbacks
 import dji.v5.common.error.IDJIError
 import dji.v5.common.register.DJISDKInitEvent
+import dji.v5.manager.KeyManager
 import dji.v5.manager.SDKManager
 import dji.v5.manager.datacenter.MediaDataCenter
 import dji.v5.manager.interfaces.ICameraStreamManager
@@ -30,19 +43,29 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
+data class SelectedTarget(
+    val label: String,
+    var cx: Float,
+    var cy: Float,
+    var missedFrames: Int = 0
+)
+
 class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     companion object {
         private const val TAG = "ThirdsApp"
-        private const val SERVER_BASE = "http://192.168.0.5:8000"
+        private val SERVER_BASE get() = BuildConfig.AI_SERVER_URL
         private const val FRAME_INTERVAL_MS = 400L
         private const val NIMA_INTERVAL_MS = 1000L
         private const val TARGET_WIDTH = 640
+        private const val MATCH_THRESHOLD = 0.10f
+        private const val MISS_LIMIT = 15
     }
 
     // ── Views ──────────────────────────────────────────────────────────────
@@ -51,6 +74,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private lateinit var tvStatus: TextView
     private lateinit var tvNimaScore: TextView
     private lateinit var btnDetect: Button
+    private lateinit var btnCapture: FloatingActionButton
 
     // ── Surface state ──────────────────────────────────────────────────────
     private var surface: Surface? = null
@@ -64,13 +88,23 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private var lastSentMs = 0L
 
     // ── NIMA state ─────────────────────────────────────────────────────────
-    private val isNimaRunning = AtomicBoolean(false)
     private val nimaInFlight = AtomicBoolean(false)
     private var nimaLastSentMs = 0L
 
     // JPEG 캐시: YOLO 인코딩 결과를 NIMA가 재사용 (600ms 이내)
     @Volatile private var cachedJpeg: ByteArray? = null
     @Volatile private var cachedJpegMs: Long = 0L
+
+    // ── Selection state (Main thread only) ────────────────────────────────
+    private val selectedTargets = mutableListOf<SelectedTarget>()
+    private var latestDetections: List<Detection> = emptyList()
+
+    // ── Capture state ──────────────────────────────────────────────────────
+    private val captureRequested = AtomicBoolean(false)
+    @Volatile private var pendingTargetsJson: String = "[]"
+
+    // ── Gesture ────────────────────────────────────────────────────────────
+    private lateinit var gestureDetector: GestureDetector
 
     // ── Networking ─────────────────────────────────────────────────────────
     private val ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -79,15 +113,28 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         .readTimeout(2, TimeUnit.SECONDS)
         .writeTimeout(2, TimeUnit.SECONDS)
         .build()
+    private val captureHttpClient = OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
+        .writeTimeout(5, TimeUnit.SECONDS)
+        .build()
 
     // ── Frame listener ─────────────────────────────────────────────────────
     private val frameListener = ICameraStreamManager.CameraFrameListener {
             frameData, offset, length, frameW, frameH, format ->
         Log.d(TAG, "Frame: ${frameW}x${frameH} fmt=$format len=$length ts=${System.currentTimeMillis()}")
 
-        val yoloWants = isDetecting.get()
-        val nimaWants = isNimaRunning.get()
-        if (!yoloWants && !nimaWants) return@CameraFrameListener
+        // ── Capture 게이트 (탐지 여부와 무관) ────────────────────────────
+        if (captureRequested.compareAndSet(true, false)) {
+            val frameCopy = frameData.copyOfRange(offset, offset + length)
+            val fw = frameW; val fh = frameH
+            val json = pendingTargetsJson
+            ioScope.launch { captureAndSend(frameCopy, fw, fh, json) }
+        }
+
+        if (!isDetecting.get()) return@CameraFrameListener
+        val yoloWants = true
+        val nimaWants = true
 
         val now = System.currentTimeMillis()
 
@@ -102,9 +149,21 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                     val jpegBytes = nv21ToJpeg(copy, fw, fh)
                     cachedJpeg = jpegBytes
                     cachedJpegMs = System.currentTimeMillis()
-                    val detections = sendFrame(jpegBytes)
+                    val rawDetections = sendFrame(jpegBytes)
+                    Log.d(TAG, "[2] parsed rawDetections.size=${rawDetections.size}  isDetecting=${isDetecting.get()}")
                     if (isDetecting.get()) {
-                        withContext(Dispatchers.Main) { overlayView.setDetections(detections) }
+                        withContext(Dispatchers.Main) {
+                            val marked = try {
+                                rebindSelections(rawDetections)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "rebindSelections error: $e")
+                                rawDetections
+                            }
+                            Log.d(TAG, "[3] after rebind marked.size=${marked.size}")
+                            Log.d(TAG, "[4] calling overlayView.setDetections(${marked.size})")
+                            latestDetections = marked
+                            overlayView.setDetections(marked)
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "YOLO error: $e")
@@ -142,6 +201,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        enableImmersiveMode()
 
         surfaceView  = findViewById(R.id.sv_fpv)
         overlayView  = findViewById(R.id.overlay)
@@ -149,22 +209,63 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         tvNimaScore  = findViewById(R.id.tv_nima_score)
         btnDetect    = findViewById(R.id.btn_detect)
 
+        btnCapture    = findViewById(R.id.btn_capture)
+
         surfaceView.holder.addCallback(this)
         btnDetect.setOnClickListener { toggleDetection() }
+        btnCapture.setOnClickListener {
+            btnCapture.isEnabled = false
+            val arr = JSONArray()
+            for (det in latestDetections) {
+                if (!det.selected) continue
+                arr.put(JSONObject().apply {
+                    put("class", det.label)
+                    put("bbox", JSONArray().apply {
+                        put(det.cx.toDouble()); put(det.cy.toDouble())
+                        put(det.w.toDouble());  put(det.h.toDouble())
+                    })
+                })
+            }
+            pendingTargetsJson = arr.toString()
+            captureRequested.set(true)
+        }
+
+        gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onSingleTapUp(e: MotionEvent): Boolean {
+                handleTap(e.x, e.y)
+                return true
+            }
+        })
+        surfaceView.setOnTouchListener { _, event ->
+            gestureDetector.onTouchEvent(event)
+            true
+        }
 
         initDjiSdk()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) enableImmersiveMode()
+    }
+
+    private fun enableImmersiveMode() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
     }
 
     override fun onPause() {
         super.onPause()
         stopDetection()
-        isNimaRunning.set(false)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         stopDetection()
-        isNimaRunning.set(false)
         if (isDroneConnected) {
             MediaDataCenter.getInstance().cameraStreamManager.removeFrameListener(frameListener)
             surface?.let {
@@ -188,7 +289,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private fun stopDetection() {
         isDetecting.set(false)
         btnDetect.text = "탐지 시작"
+        selectedTargets.clear()
+        latestDetections = emptyList()
         overlayView.setDetections(emptyList())
+        tvNimaScore.text = "--"
     }
 
     // ── SurfaceHolder.Callback ─────────────────────────────────────────────
@@ -243,12 +347,12 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             override fun onProductConnect(productId: Int) {
                 Log.d(TAG, "Drone connected, productId=$productId")
                 isDroneConnected = true
-                isNimaRunning.set(true)
                 MediaDataCenter.getInstance().cameraStreamManager
                     .addFrameListener(ComponentIndexType.LEFT_OR_MAIN, ICameraStreamManager.FrameFormat.NV21, frameListener)
                 runOnUiThread {
                     tvStatus.text = "드론 연결됨"
                     btnDetect.isEnabled = true
+                    btnCapture.isEnabled = true
                     updateCameraStream()
                 }
             }
@@ -256,7 +360,6 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             override fun onProductDisconnect(productId: Int) {
                 Log.d(TAG, "Drone disconnected, productId=$productId")
                 isDroneConnected = false
-                isNimaRunning.set(false)
                 stopDetection()
                 MediaDataCenter.getInstance().cameraStreamManager.removeFrameListener(frameListener)
                 surface?.let {
@@ -266,6 +369,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                     tvStatus.text = "드론 연결 해제"
                     tvNimaScore.text = "--"
                     btnDetect.isEnabled = false
+                    btnCapture.isEnabled = false
                 }
             }
 
@@ -284,6 +388,143 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 Log.d(TAG, "DB download: $current/$total")
             }
         })
+    }
+
+    // ── Tap handling ───────────────────────────────────────────────────────
+
+    private fun handleTap(rawX: Float, rawY: Float) {
+        val vw = overlayView.width.toFloat()
+        val vh = overlayView.height.toFloat()
+        if (vw <= 0f || vh <= 0f) return
+        val normX = rawX / vw
+        val normY = rawY / vh
+
+        // 가장 작은 박스(가장 구체적 대상) 우선 히트-테스트
+        var hitDet: Detection? = null
+        var hitArea = Float.MAX_VALUE
+        for (det in latestDetections) {
+            val l = det.cx - det.w / 2f
+            val r = det.cx + det.w / 2f
+            val t = det.cy - det.h / 2f
+            val b = det.cy + det.h / 2f
+            if (normX in l..r && normY in t..b) {
+                val area = det.w * det.h
+                if (area < hitArea) { hitArea = area; hitDet = det }
+            }
+        }
+
+        if (hitDet != null) toggleSelection(hitDet)
+        else triggerFocus(normX, normY)
+    }
+
+    private fun toggleSelection(det: Detection) {
+        val existingIdx = selectedTargets.indexOfFirst { t ->
+            t.label == det.label &&
+            Math.hypot((t.cx - det.cx).toDouble(), (t.cy - det.cy).toDouble()) < MATCH_THRESHOLD
+        }
+        if (existingIdx >= 0) selectedTargets.removeAt(existingIdx)
+        else selectedTargets.add(SelectedTarget(det.label, det.cx, det.cy))
+
+        val marked = try {
+            applySelections(latestDetections)
+        } catch (e: Exception) {
+            Log.e(TAG, "applySelections error: $e")
+            latestDetections
+        }
+        latestDetections = marked
+        overlayView.setDetections(marked)
+    }
+
+    // ── Selection tracking ─────────────────────────────────────────────────
+
+    // 즉시 재그리기용: expiry 없이 현재 selectedTargets를 detections에 마킹
+    private fun applySelections(detections: List<Detection>): List<Detection> {
+        val reset = detections.map { if (it.selected) it.copy(selected = false) else it }
+        if (selectedTargets.isEmpty()) return reset
+        val result = reset.toMutableList()
+        val used = mutableSetOf<Int>()
+        for (t in selectedTargets) {
+            var bestIdx = -1; var bestDist = Float.MAX_VALUE
+            for (i in result.indices) {
+                if (i in used || result[i].label != t.label) continue
+                val d = Math.hypot(
+                    (result[i].cx - t.cx).toDouble(),
+                    (result[i].cy - t.cy).toDouble()
+                ).toFloat()
+                if (d < MATCH_THRESHOLD && d < bestDist) { bestDist = d; bestIdx = i }
+            }
+            if (bestIdx >= 0) {
+                result[bestIdx] = result[bestIdx].copy(selected = true)
+                used += bestIdx
+            }
+        }
+        return result
+    }
+
+    // 프레임 단위 재바인딩: 좌표 갱신 + 연속 미탐지 만료
+    private fun rebindSelections(rawDetections: List<Detection>): List<Detection> {
+        if (selectedTargets.isEmpty()) return rawDetections
+        val result = rawDetections.toMutableList()
+        val used = mutableSetOf<Int>()
+        val expired = mutableListOf<SelectedTarget>()
+        for (t in selectedTargets) {
+            var bestIdx = -1; var bestDist = Float.MAX_VALUE
+            for (i in result.indices) {
+                if (i in used || result[i].label != t.label) continue
+                val d = Math.hypot(
+                    (result[i].cx - t.cx).toDouble(),
+                    (result[i].cy - t.cy).toDouble()
+                ).toFloat()
+                if (d < MATCH_THRESHOLD && d < bestDist) { bestDist = d; bestIdx = i }
+            }
+            if (bestIdx >= 0) {
+                val matched = rawDetections[bestIdx]
+                result[bestIdx] = result[bestIdx].copy(selected = true)
+                used += bestIdx
+                t.cx = matched.cx; t.cy = matched.cy; t.missedFrames = 0
+            } else {
+                t.missedFrames++
+                if (t.missedFrames > MISS_LIMIT) expired += t
+            }
+        }
+        selectedTargets.removeAll(expired.toSet())
+        return result
+    }
+
+    // ── Tap-to-focus ───────────────────────────────────────────────────────
+
+    private fun triggerFocus(normX: Float, normY: Float) {
+        if (!isDroneConnected) return
+        ioScope.launch {
+            try {
+                val key = KeyTools.createCameraKey(
+                    CameraKey.KeyCameraFocusTarget,
+                    ComponentIndexType.LEFT_OR_MAIN,
+                    CameraLensType.CAMERA_LENS_ZOOM
+                )
+                KeyManager.getInstance().setValue(
+                    key,
+                    DoublePoint2D(normX.toDouble(), normY.toDouble()),
+                    object : CommonCallbacks.CompletionCallback {
+                        override fun onSuccess() {
+                            Log.d(TAG, "Focus OK ($normX, $normY)")
+                        }
+                        override fun onFailure(e: IDJIError) {
+                            Log.w(TAG, "Focus failed: $e")
+                            runOnUiThread {
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "이 기종은 탭 포커스 미지원",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    }
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Focus error: $e")
+            }
+        }
     }
 
     // ── Frame → JPEG ───────────────────────────────────────────────────────
@@ -333,6 +574,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         }
 
         val responseBody = response.body?.string() ?: return emptyList()
+        Log.d(TAG, "[1] YOLO response len=${responseBody.length} body=$responseBody")
         return parseDetections(responseBody)
     }
 
@@ -357,6 +599,45 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         } catch (e: Exception) {
             Log.e(TAG, "JSON parse error: $e")
             emptyList()
+        }
+    }
+
+    // ── Capture network ────────────────────────────────────────────────────
+
+    private suspend fun captureAndSend(
+        nv21: ByteArray, width: Int, height: Int, targetsJson: String
+    ) {
+        try {
+            val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
+            val out = ByteArrayOutputStream()
+            yuvImage.compressToJpeg(Rect(0, 0, width, height), 90, out)
+            val jpegBytes = out.toByteArray()
+
+            val body = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("image", "snapshot.jpg",
+                    jpegBytes.toRequestBody("image/jpeg".toMediaType()))
+                .addFormDataPart("targets", targetsJson)
+                .build()
+
+            val request = Request.Builder()
+                .url("$SERVER_BASE/capture")
+                .post(body)
+                .build()
+
+            val response = captureHttpClient.newCall(request).execute()
+            withContext(Dispatchers.Main) {
+                btnCapture.isEnabled = true
+                val msg = if (response.isSuccessful) "촬영 저장됨"
+                          else "촬영 실패 (${response.code})"
+                Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Capture error: $e")
+            withContext(Dispatchers.Main) {
+                btnCapture.isEnabled = true
+                Toast.makeText(this@MainActivity, "촬영 전송 오류", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
