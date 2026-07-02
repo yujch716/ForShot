@@ -4,45 +4,75 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- 드론(쿼드콥터) 상면 아이콘 — 흰색. 중앙 기준 축소해 테두리 여백 확보 -->
+    <!-- ic_drone(24x24) 디자인을 중앙에 배치, 테두리 여백 확보 -->
     <group
-        android:pivotX="54"
-        android:pivotY="54"
-        android:scaleX="0.66"
-        android:scaleY="0.66">
+        android:scaleX="2.5"
+        android:scaleY="2.5"
+        android:translateX="24"
+        android:translateY="24">
 
-        <!-- 대각 암(X자, 로터를 몸체로 연결) -->
         <path
             android:strokeColor="#FFFFFF"
-            android:strokeWidth="5"
+            android:strokeWidth="2"
             android:strokeLineCap="round"
-            android:pathData="M34,34 L74,74 M74,34 L34,74" />
-
-        <!-- 4개 로터(프로펠러 가드 링) -->
-        <path
+            android:strokeLineJoin="round"
             android:fillColor="#00000000"
-            android:strokeColor="#FFFFFF"
-            android:strokeWidth="4"
-            android:pathData="M22,34 a12,12 0 1,0 24,0 a12,12 0 1,0 -24,0" />
+            android:pathData="M10,10h4v4h-4l0,-4" />
         <path
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
             android:fillColor="#00000000"
-            android:strokeColor="#FFFFFF"
-            android:strokeWidth="4"
-            android:pathData="M62,34 a12,12 0 1,0 24,0 a12,12 0 1,0 -24,0" />
+            android:pathData="M10,10l-3.5,-3.5" />
         <path
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
             android:fillColor="#00000000"
-            android:strokeColor="#FFFFFF"
-            android:strokeWidth="4"
-            android:pathData="M22,74 a12,12 0 1,0 24,0 a12,12 0 1,0 -24,0" />
+            android:pathData="M9.96,6a3.5,3.5 0 1 0 -3.96,3.96" />
         <path
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
             android:fillColor="#00000000"
-            android:strokeColor="#FFFFFF"
-            android:strokeWidth="4"
-            android:pathData="M62,74 a12,12 0 1,0 24,0 a12,12 0 1,0 -24,0" />
-
-        <!-- 중앙 몸체 -->
+            android:pathData="M14,10l3.5,-3.5" />
         <path
-            android:fillColor="#FFFFFF"
-            android:pathData="M44,54 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0" />
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:fillColor="#00000000"
+            android:pathData="M18,9.96a3.5,3.5 0 1 0 -3.96,-3.96" />
+        <path
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:fillColor="#00000000"
+            android:pathData="M14,14l3.5,3.5" />
+        <path
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:fillColor="#00000000"
+            android:pathData="M14.04,18a3.5,3.5 0 1 0 3.96,-3.96" />
+        <path
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:fillColor="#00000000"
+            android:pathData="M10,14l-3.5,3.5" />
+        <path
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:fillColor="#00000000"
+            android:pathData="M6,14.04a3.5,3.5 0 1 0 3.96,3.96" />
     </group>
 </vector>
