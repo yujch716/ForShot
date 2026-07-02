@@ -9,6 +9,13 @@ import android.view.View
 
 private const val DEFAULT_BOX_COLOR = "#34C759"
 
+data class SelectedTarget(
+    val label: String,
+    var cx: Float,
+    var cy: Float,
+    var missedFrames: Int = 0
+)
+
 data class Detection(
     val label: String,
     val confidence: Float,
