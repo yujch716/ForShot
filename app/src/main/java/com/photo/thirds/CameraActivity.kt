@@ -20,6 +20,7 @@ import android.view.SurfaceView
 import android.view.View
 import android.widget.Button
 import android.widget.PopupMenu
+import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -42,6 +43,7 @@ import dji.v5.common.error.IDJIError
 import dji.v5.manager.KeyManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -81,6 +83,7 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private lateinit var tvNimaScore: TextView
     private lateinit var btnDetect: Button
     private lateinit var btnCapture: FloatingActionButton
+    private lateinit var pbCapture: ProgressBar
     private lateinit var btnMenu: Button
 
     // ── Flight (drone only) ────────────────────────────────────────────────
@@ -116,6 +119,7 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     // ── Capture state ──────────────────────────────────────────────────────
     private val captureRequested = AtomicBoolean(false)
+    private val captureInFlight = AtomicBoolean(false)
     @Volatile private var pendingTargetsJson: String = "[]"
 
     // ── Gesture ────────────────────────────────────────────────────────────
@@ -171,6 +175,7 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
         tvNimaScore  = findViewById(R.id.tv_nima_score)
         btnDetect    = findViewById(R.id.btn_detect)
         btnCapture   = findViewById(R.id.btn_capture)
+        pbCapture    = findViewById(R.id.pb_capture)
         btnMenu      = findViewById(R.id.btn_menu)
 
         btnDetect.isEnabled = false
@@ -179,7 +184,9 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
         btnMenu.setOnClickListener { showFlightMenu() }
         btnDetect.setOnClickListener { toggleDetection() }
         btnCapture.setOnClickListener {
-            btnCapture.isEnabled = false
+            // in-flight 가드: 이미 요청 진행 중이면 탭을 완전히 무시(한 번에 /capture 1개).
+            if (!captureInFlight.compareAndSet(false, true)) return@setOnClickListener
+            setCaptureLoading(true)
             val arr = JSONArray()
             for (det in latestDetections) {
                 if (!det.selected) continue
@@ -702,6 +709,19 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     // ── Capture network ────────────────────────────────────────────────────
 
+    /** 촬영 버튼 로딩 상태 토글 (메인 스레드에서 호출). */
+    private fun setCaptureLoading(loading: Boolean) {
+        if (loading) {
+            btnCapture.isEnabled = false
+            btnCapture.alpha = 0.4f          // 아이콘을 흐리게 → 스피너가 도드라지게
+            pbCapture.visibility = View.VISIBLE
+        } else {
+            pbCapture.visibility = View.GONE
+            btnCapture.alpha = 1f
+            btnCapture.isEnabled = true
+        }
+    }
+
     private fun isValidGps(lat: Double?, lng: Double?): Boolean {
         if (lat == null || lng == null) return false
         if (lat.isNaN() || lng.isNaN()) return false
@@ -740,15 +760,19 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
             val request = Request.Builder().url("$SERVER_BASE/capture").post(body).build()
             val response = captureHttpClient.newCall(request).execute()
             withContext(Dispatchers.Main) {
-                btnCapture.isEnabled = true
                 val msg = if (response.isSuccessful) "촬영 저장됨" else "촬영 실패 (${response.code})"
                 Toast.makeText(this@CameraActivity, msg, Toast.LENGTH_SHORT).show()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Capture error: $e")
             withContext(Dispatchers.Main) {
-                btnCapture.isEnabled = true
                 Toast.makeText(this@CameraActivity, "촬영 전송 오류", Toast.LENGTH_SHORT).show()
+            }
+        } finally {
+            // 성공/실패/타임아웃 어느 쪽이든 무조건 버튼을 대기 상태로 복구.
+            withContext(NonCancellable + Dispatchers.Main) {
+                setCaptureLoading(false)
+                captureInFlight.set(false)
             }
         }
     }
