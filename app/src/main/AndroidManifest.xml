@@ -72,6 +72,7 @@
         <activity
             android:name=".CameraActivity"
             android:exported="true"
+            android:screenOrientation="landscape"
             android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
