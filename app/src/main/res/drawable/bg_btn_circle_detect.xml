@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 탐지 버튼 배경. 탐지 활성(isActivated) 또는 눌림: 네온 하늘색 글로우+네온 테두리 / 기본: 검정+회색 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_activated="true">
+        <shape android:shape="oval">
+            <solid android:color="#4D00E5FF" />
+            <stroke android:width="2dp" android:color="#00E5FF" />
+        </shape>
+    </item>
+    <item android:state_pressed="true">
+        <shape android:shape="oval">
+            <solid android:color="#4D00E5FF" />
+            <stroke android:width="2dp" android:color="#00E5FF" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="oval">
+            <solid android:color="#1A888888" />
+            <stroke android:width="2dp" android:color="#888888" />
+        </shape>
+    </item>
+</selector>

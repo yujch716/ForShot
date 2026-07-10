@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 원형 버튼 배경(메뉴/촬영). 평소: 10% 회색 / 눌림: 30% 흰색 + 밝은 회색 테두리 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 눌림 또는 활성(메뉴 열림 등): 30% 흰색 유지 -->
+    <item android:state_pressed="true">
+        <shape android:shape="oval">
+            <solid android:color="#4DFFFFFF" />
+            <stroke android:width="2dp" android:color="#DDDDDD" />
+        </shape>
+    </item>
+    <item android:state_activated="true">
+        <shape android:shape="oval">
+            <solid android:color="#4DFFFFFF" />
+            <stroke android:width="2dp" android:color="#DDDDDD" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="oval">
+            <solid android:color="#1A888888" />
+            <stroke android:width="2dp" android:color="#888888" />
+        </shape>
+    </item>
+</selector>
