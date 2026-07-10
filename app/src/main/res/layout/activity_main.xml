@@ -37,90 +37,214 @@
         android:textColor="#FFFFFF"
         android:textSize="14sp" />
 
-    <Button
+    <!-- 메뉴: 아래 왼쪽, 회색 테두리 원형, ic_more_vert(흰색) -->
+    <ImageButton
         android:id="@+id/btn_menu"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
         android:layout_gravity="bottom|start"
         android:layout_margin="24dp"
-        android:backgroundTint="#88000000"
-        android:insetLeft="0dp"
-        android:insetRight="0dp"
-        android:minWidth="0dp"
-        android:paddingHorizontal="12dp"
-        android:text=""
-        android:textColor="#FFFFFF"
-        android:visibility="gone"
-        app:icon="@drawable/ic_more_vert"
-        app:iconGravity="textStart"
-        app:iconPadding="0dp"
-        app:iconTint="#FFFFFF" />
+        android:background="@drawable/bg_btn_circle_gray"
+        android:contentDescription="메뉴"
+        android:padding="14dp"
+        android:scaleType="centerInside"
+        android:src="@drawable/ic_more_vert"
+        android:tint="@color/icon_tint_gray_btn"
+        android:visibility="gone" />
 
-    <Button
-        android:id="@+id/btn_detect"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom|center_horizontal"
-        android:layout_margin="24dp"
-        android:backgroundTint="#88000000"
-        android:text="탐지 시작"
-        android:textColor="#FFFFFF" />
-
-    <com.google.android.material.floatingactionbutton.FloatingActionButton
-        android:id="@+id/btn_capture"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom|end"
-        android:layout_margin="24dp"
-        android:contentDescription="촬영"
-        android:enabled="false"
-        app:backgroundTint="#CC1A1A1A"
-        app:fabSize="normal"
-        app:srcCompat="@drawable/ic_camera"
-        app:tint="#FFFFFF" />
-
-    <!-- 촬영 로딩 스피너 (촬영 FAB 위에 겹쳐 표시) -->
-    <ProgressBar
-        android:id="@+id/pb_capture"
-        style="?android:attr/progressBarStyle"
+    <!-- 정지: 오른쪽 맨 위(탐지 위), 빨강 테두리 원형, stop(빨강) -->
+    <ImageButton
+        android:id="@+id/btn_emergency_stop"
         android:layout_width="56dp"
         android:layout_height="56dp"
         android:layout_gravity="bottom|end"
+        android:layout_marginEnd="32dp"
+        android:layout_marginBottom="184dp"
+        android:background="@drawable/bg_btn_circle_red"
+        android:contentDescription="정지"
+        android:padding="14dp"
+        android:scaleType="centerInside"
+        android:src="@drawable/stop"
+        android:tint="#FFFFFF"
+        android:visibility="gone" />
+
+    <!-- 탐지: 오른쪽 가운데(촬영 위), 회색 테두리 원형, search(흰색) -->
+    <ImageButton
+        android:id="@+id/btn_detect"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="32dp"
+        android:layout_marginBottom="112dp"
+        android:background="@drawable/bg_btn_circle_detect"
+        android:contentDescription="탐지"
+        android:padding="14dp"
+        android:scaleType="centerInside"
+        android:src="@drawable/search"
+        android:tint="@color/icon_tint_detect" />
+
+    <!-- 촬영: 오른쪽 맨 아래, 제일 큼, 회색 테두리 원형, camera(흰색) -->
+    <ImageButton
+        android:id="@+id/btn_capture"
+        android:layout_width="72dp"
+        android:layout_height="72dp"
+        android:layout_gravity="bottom|end"
         android:layout_margin="24dp"
+        android:background="@drawable/bg_btn_circle_gray"
+        android:contentDescription="촬영"
+        android:enabled="false"
+        android:padding="18dp"
+        android:scaleType="centerInside"
+        android:src="@drawable/camera"
+        android:tint="@color/icon_tint_gray_btn" />
+
+    <!-- 촬영 로딩 스피너 (촬영 버튼 위에 겹쳐 표시) -->
+    <ProgressBar
+        android:id="@+id/pb_capture"
+        style="?android:attr/progressBarStyle"
+        android:layout_width="72dp"
+        android:layout_height="72dp"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="24dp"
+        android:padding="18dp"
         android:indeterminateTint="#FFFFFF"
         android:visibility="gone" />
 
-    <LinearLayout
-        android:id="@+id/ll_nima_badge"
+    <!-- 스캔 버튼: 촬영 FAB 왼쪽. 드론 모드에서만 표시. -->
+    <Button
+        android:id="@+id/btn_scan"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_gravity="top|end"
-        android:layout_margin="16dp"
-        android:background="#CC000000"
-        android:clickable="false"
-        android:focusable="false"
-        android:orientation="vertical"
-        android:paddingHorizontal="14dp"
-        android:paddingVertical="10dp">
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="96dp"
+        android:layout_marginBottom="30dp"
+        android:alpha="0.4"
+        android:backgroundTint="#CC1A1A1A"
+        android:enabled="false"
+        android:text="스캔"
+        android:textColor="#FFFFFF"
+        android:visibility="gone" />
 
-        <TextView
-            android:id="@+id/tv_nima_score"
+    <!-- 세부조정 버튼: scan-peak 이후 NIMA 방향 루프로 미세 보정. 스캔 완료 후에만 활성. -->
+    <Button
+        android:id="@+id/btn_adjust"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="170dp"
+        android:layout_marginBottom="30dp"
+        android:alpha="0.4"
+        android:backgroundTint="#CC1A1A1A"
+        android:enabled="false"
+        android:text="세부\n조정"
+        android:textColor="#FFFFFF"
+        android:visibility="gone" />
+
+    <!-- 짐벌 테스트 버튼: 이륙 없이 짐벌 pitch 검증. 드론 모드에서만 표시. -->
+    <Button
+        android:id="@+id/btn_gimbal_test"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="244dp"
+        android:layout_marginBottom="30dp"
+        android:backgroundTint="#CC1A1A1A"
+        android:text="짐벌\n테스트"
+        android:textColor="#FFFFFF"
+        android:visibility="gone" />
+
+    <!-- 틸트 버튼: 세부조정(전후진) 완료 후 활성. 짐벌 sweep → /vlm-select. 드론 모드만 표시. -->
+    <Button
+        android:id="@+id/btn_tilt"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="318dp"
+        android:layout_marginBottom="30dp"
+        android:alpha="0.4"
+        android:backgroundTint="#CC1A1A1A"
+        android:enabled="false"
+        android:text="틸트"
+        android:textColor="#FFFFFF"
+        android:visibility="gone" />
+
+
+    <!-- 최종 사진 오버레이: /vlm-select 결과 표시. 탭하면 닫힘. 최상단에 배치. -->
+    <ImageView
+        android:id="@+id/iv_final_photo"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#000000"
+        android:clickable="true"
+        android:contentDescription="최종 선택 사진"
+        android:focusable="true"
+        android:scaleType="fitCenter"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/tv_final_caption"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:background="#88000000"
+        android:padding="12dp"
+        android:textColor="#FFFFFF"
+        android:textSize="15sp"
+        android:visibility="gone" />
+
+    <!-- 촬영 자동 파이프라인 오버레이: 촬영 순간 스냅샷 고정 + 4단계 진행 표시. 최상단, 기본 숨김. -->
+    <FrameLayout
+        android:id="@+id/pipeline_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone">
+
+        <!-- 배경은 라이브 드론 FPV(뒤의 sv_fpv)를 그대로 노출 → 아래 스크림만 덮는다. -->
+        <!-- 40% 검정 레이어 -->
+        <View
+            android:id="@+id/v_pipeline_scrim"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#66000000" />
+
+        <!-- 4단계 진행 표시: 원형 노드(아이콘)+연결선+펄스, 전체 폭. -->
+        <com.photo.thirds.PipelineProgressView
+            android:id="@+id/pipeline_progress"
+            android:layout_width="match_parent"
+            android:layout_height="190dp"
+            android:layout_gravity="center" />
+
+        <!-- 종료 버튼(닫기/저장): 정제 완료 후 표시 -->
+        <LinearLayout
+            android:id="@+id/ll_pipeline_end"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:gravity="center"
-            android:text="--"
-            android:textColor="#FFFFFF"
-            android:textSize="36sp"
-            android:textStyle="bold" />
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_marginBottom="48dp"
+            android:orientation="horizontal"
+            android:visibility="gone">
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:gravity="center"
-            android:text="NIMA"
-            android:textColor="#AAFFFFFF"
-            android:textSize="12sp" />
+            <Button
+                android:id="@+id/btn_pipeline_close"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="24dp"
+                android:backgroundTint="#CC1A1A1A"
+                android:text="닫기"
+                android:textColor="#FFFFFF" />
 
-    </LinearLayout>
+            <Button
+                android:id="@+id/btn_pipeline_download"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:backgroundTint="#00E5FF"
+                android:text="저장"
+                android:textColor="#00232B" />
+
+        </LinearLayout>
+
+    </FrameLayout>
 
 </FrameLayout>

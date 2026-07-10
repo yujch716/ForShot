@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <!-- 원 테두리 -->
+    <path
+        android:strokeColor="#E3E3E3"
+        android:strokeWidth="1.6"
+        android:fillColor="@android:color/transparent"
+        android:pathData="M12,3.5 A8.5,8.5 0 1,1 12,20.5 A8.5,8.5 0 1,1 12,3.5 Z" />
+
+    <!-- 상 -->
+    <path
+        android:strokeColor="#E3E3E3"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:pathData="M12,3.5 L12,7.5" />
+
+    <!-- 하 -->
+    <path
+        android:strokeColor="#E3E3E3"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:pathData="M12,16.5 L12,20.5" />
+
+    <!-- 좌 -->
+    <path
+        android:strokeColor="#E3E3E3"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:pathData="M3.5,12 L7.5,12" />
+
+    <!-- 우 -->
+    <path
+        android:strokeColor="#E3E3E3"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:pathData="M16.5,12 L20.5,12" />
+
+</vector>
