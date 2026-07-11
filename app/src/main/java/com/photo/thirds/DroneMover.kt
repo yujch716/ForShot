@@ -19,6 +19,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.math.cos
@@ -81,16 +82,12 @@ class DroneMover(
          * 실측이 어긋나면 야외 로그의 '실측 이동거리 추정' 보고 이 값만 조정.
          */
         const val SCAN_TIME_MS = 7333L
-        /** 세부조정 이동 속도 (m/s). 저속으로 관성 최소화. */
-        private const val ADJUST_SPEED = 0.1
-        /** 세부조정 1스텝 목표 이동거리 (m). 폐쇄루프: 실측 이동이 이 거리에 닿으면 정지. */
-        const val ADJUST_STEP_M = 0.05
         /**
-         * 세부조정 시간 상한 (ms). 폐쇄루프 안전캡 — 목표거리(5cm)에 도달하면 이 전에 멈춘다.
-         * 반응지연(~0.4s)+가감속 때문에 5cm 실이동엔 개방루프 0.5s로는 턱없이 부족(실측 ~1cm).
-         * 텔레메트리가 아예 없으면 개방루프 폴백 시간까지만 가고 정지(아래 계산).
+         * 세부조정 30cm 스캔 시간 (ms). 2m 스캔(SCAN_TIME_MS)과 동일 로직, 거리만 짧게.
+         * 명목 0.5m(0.3 m/s × 1.667s)이지만 반응지연 보정 후 실측 ≈ 0.3m(SCAN_DISTANCE_DETAIL).
+         * 실측 어긋나면 야외 로그의 '실측 이동거리 추정' 보고 이 값 조정.
          */
-        const val ADJUST_TIME_MS = 2500L
+        const val SCAN_TIME_DETAIL_MS = 1667L
         /**
          * 스틱 명령→기체 실제 반응까지 지연(ms). 실측 로그상 모든 이동에서 첫 ~0.4초는 속도 0.
          * 폐쇄루프 불가(텔레메트리 null) 시 개방루프 폴백시간 = 지연 + 목표거리/속도 계산에 사용.
@@ -111,6 +108,12 @@ class DroneMover(
         private const val ZOOM_SIGN = 1
         /** 스틱 값 주기 전송 간격 (ms). */
         private const val SEND_INTERVAL_MS = 40L
+        /**
+         * Virtual Stick 활성화(enableVirtualStick) 콜백 대기 상한(ms).
+         * SDK 가 이 시간 안에 콜백(onSuccess/onFailure)을 안 주면 실패로 간주하고 정리한다.
+         * 없으면 콜백 미수신 시 무한 대기(로그·토스트 없이 멈춤) → 세부조정 등에서 hang 발생.
+         */
+        private const val ENABLE_VSTICK_TIMEOUT_MS = 3000L
         /** 실측 텔레메트리 샘플 간격 (틱 단위). 3틱 ≈ 120ms. */
         private const val SAMPLE_EVERY_TICKS = 3
         /** dr_norm 이 이 값 이하면 "충분히 중앙" → 이동 안 함. */
@@ -180,51 +183,18 @@ class DroneMover(
     ) = moveDirectional(dx, dy, SCAN_SPEED, durationMs, 0.0, false, connected, flying, gpsLevel, 0.0, onResult)
 
     /**
-     * 세부조정 저속 이동. dx/dy 방향으로 ADJUST_SPEED 로 이동하되, **실측 이동이 ADJUST_STEP_M(5cm)에
-     * 닿으면 정지**(폐쇄루프). 반응지연/가감속에 무관하게 5cm를 맞추고 오버슛을 막는다.
-     * ADJUST_TIME_MS 는 안전 상한(텔레메트리 없거나 못 미칠 때만 도달).
-     * dx: 오른쪽+, dy: 아래+ (화면 좌표). dr_norm 임계값 검사는 하지 않음.
-     * 게이트(연결/이륙/GPS/중복)에 걸리면 이동하지 않고 [onResult]`(false)`만 호출.
-     */
-    fun moveAdjust(
-        dx: Double,
-        dy: Double,
-        connected: Boolean,
-        flying: Boolean,
-        gpsLevel: Int,
-        onResult: (moved: Boolean) -> Unit
-    ) = moveDirectional(dx, dy, ADJUST_SPEED, ADJUST_TIME_MS, 0.0, false, connected, flying, gpsLevel, 0.0, onResult, ADJUST_STEP_M)
-
-    /**
-     * 줌(전후진) 저속 이동. forward=true → 전진, false → 후진. roll 필드로 약 5cm.
-     * 게이트(연결/이륙/GPS/중복)·Virtual Stick OFF·비상정지는 moveDirectional 이 보장.
-     */
-    fun moveZoom(
-        forward: Boolean,
-        connected: Boolean,
-        flying: Boolean,
-        gpsLevel: Int,
-        onResult: (moved: Boolean) -> Unit
-    ) = moveDirectional(
-        0.0, 0.0, ADJUST_SPEED, ADJUST_TIME_MS, 0.0, false,
-        connected, flying, gpsLevel,
-        if (forward) ADJUST_SPEED else -ADJUST_SPEED,
-        onResult,
-        ADJUST_STEP_M   // 폐쇄루프: 전후 5cm 실측되면 정지.
-    )
-
-    /**
-     * 촬영 전 1m 후진. foreAft 음수 → roll 필드 음수(검증된 전후 매핑) → 실제 후진.
-     * 게이트(연결/이륙/GPS/중복)·Virtual Stick OFF·비상정지(aborted)는 moveDirectional 이 보장.
+     * 후진. [distanceM] m 만큼 뒤로(기본 BACKUP_DISTANCE). foreAft 음수 → roll 필드 음수(검증된 전후 매핑) → 실제 후진.
+     * 개방루프(시간 기반, 거리/속도). 게이트·Virtual Stick OFF·비상정지(aborted)는 moveDirectional 이 보장.
      * @param onResult moved=true 면 후진 스틱을 실제로 보냄, false 면 게이트 차단/실패로 안 움직임.
      */
     fun moveBackup(
         connected: Boolean,
         flying: Boolean,
         gpsLevel: Int,
+        distanceM: Double = BACKUP_DISTANCE,
         onResult: (moved: Boolean) -> Unit
     ) = moveDirectional(
-        0.0, 0.0, BACKUP_SPEED, BACKUP_TIME_MS, 0.0, false,
+        0.0, 0.0, BACKUP_SPEED, ((distanceM / BACKUP_SPEED) * 1000).toLong(), 0.0, false,
         connected, flying, gpsLevel,
         -BACKUP_SPEED,   // ★ 후진: foreAft 음수 (전후진 검증 방향 재사용)
         onResult
@@ -253,15 +223,20 @@ class DroneMover(
         targetDistanceM: Double = 0.0
     ) {
         // ── 안전 게이트 ────────────────────────────────────────────────────
-        if (!connected) { toast("드론이 연결되지 않았습니다"); onResult(false); return }
-        if (!flying)    { toast("이륙(비행) 상태에서만 이동할 수 있습니다"); onResult(false); return }
+        Log.d(TAG, "이동 요청: dx=%.1f dy=%.1f foreAft=%+.2f dur=%dms (connected=%b flying=%b gps=%d)"
+            .format(dx, dy, foreAft, durationMs, connected, flying, gpsLevel))
+        if (!connected) { Log.w(TAG, "게이트 차단: 드론 미연결"); toast("드론이 연결되지 않았습니다"); onResult(false); return }
+        if (!flying)    { Log.w(TAG, "게이트 차단: 비행 상태 아님"); toast("이륙(비행) 상태에서만 이동할 수 있습니다"); onResult(false); return }
         if (gpsLevel < MIN_GPS_LEVEL) {
+            Log.w(TAG, "게이트 차단: GPS level=$gpsLevel < $MIN_GPS_LEVEL")
             toast("GPS 신호가 약해 이동을 차단합니다 (level=$gpsLevel)"); onResult(false); return
         }
         if (checkThreshold && drNorm <= DR_NORM_THRESHOLD) {
+            Log.w(TAG, "게이트 차단: 이미 중앙 dr_norm=%.3f".format(drNorm))
             toast("이미 충분히 중앙입니다 (dr_norm=%.3f)".format(drNorm)); onResult(false); return
         }
         if (!moving.compareAndSet(false, true)) {
+            Log.w(TAG, "게이트 차단: 이동 이미 진행 중")
             toast("이동이 이미 진행 중입니다"); onResult(false); return
         }
 
@@ -269,11 +244,14 @@ class DroneMover(
         scope.launch(Dispatchers.IO) {
             var moved = false
             try {
+                Log.d(TAG, "Virtual Stick 활성화 시도…")
                 val enabled = enableVirtualStick()
                 if (!enabled) {
+                    Log.w(TAG, "Virtual Stick 활성화 실패 → 이동 취소")
                     toast("Virtual Stick 활성화 실패")
                     return@launch
                 }
+                Log.d(TAG, "Virtual Stick 활성화 성공")
                 VirtualStickManager.getInstance().setVirtualStickAdvancedModeEnabled(true)
                 moved = true    // 여기부터 실제로 스틱 명령을 보냄.
                 runMove(dx, dy, speed, durationMs, foreAft, targetDistanceM)
@@ -409,19 +387,30 @@ class DroneMover(
 
     // ── 내부 ────────────────────────────────────────────────────────────────
 
-    private suspend fun enableVirtualStick(): Boolean = suspendCancellableCoroutine { cont ->
-        try {
-            VirtualStickManager.getInstance().enableVirtualStick(object : CommonCallbacks.CompletionCallback {
-                override fun onSuccess() { if (cont.isActive) cont.resume(true) }
-                override fun onFailure(error: IDJIError) {
-                    Log.e(TAG, "enableVirtualStick failure: $error")
+    private suspend fun enableVirtualStick(): Boolean {
+        val result = withTimeoutOrNull(ENABLE_VSTICK_TIMEOUT_MS) {
+            suspendCancellableCoroutine { cont ->
+                try {
+                    VirtualStickManager.getInstance().enableVirtualStick(object : CommonCallbacks.CompletionCallback {
+                        override fun onSuccess() { if (cont.isActive) cont.resume(true) }
+                        override fun onFailure(error: IDJIError) {
+                            Log.e(TAG, "enableVirtualStick failure: $error")
+                            if (cont.isActive) cont.resume(false)
+                        }
+                    })
+                } catch (e: Exception) {
+                    Log.e(TAG, "enableVirtualStick threw: $e")
                     if (cont.isActive) cont.resume(false)
                 }
-            })
-        } catch (e: Exception) {
-            Log.e(TAG, "enableVirtualStick threw: $e")
-            if (cont.isActive) cont.resume(false)
+            }
         }
+        if (result == null) {
+            // SDK 콜백 미수신 → 무한 대기 방지. 유령 활성화 가능성 정리 후 실패 반환.
+            Log.e(TAG, "enableVirtualStick 타임아웃(${ENABLE_VSTICK_TIMEOUT_MS}ms) — SDK 콜백 없음, 실패 처리")
+            disableVirtualStickQuietly()
+            return false
+        }
+        return result
     }
 
     private fun disableVirtualStickQuietly() {

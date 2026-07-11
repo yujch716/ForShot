@@ -125,7 +125,7 @@
         android:textColor="#FFFFFF"
         android:visibility="gone" />
 
-    <!-- 세부조정 버튼: scan-peak 이후 NIMA 방향 루프로 미세 보정. 스캔 완료 후에만 활성. -->
+    <!-- 세부조정 버튼(레거시, 자동 파이프라인이 대체). 스캔 완료 후에만 활성. -->
     <Button
         android:id="@+id/btn_adjust"
         android:layout_width="wrap_content"

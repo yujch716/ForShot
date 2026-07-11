@@ -84,16 +84,13 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
         private const val SCAN_FRAME_INTERVAL_MS = 500L
         private const val SCAN_FRAME_INTERVAL_S = 0.5
         private const val BACKUP_SETTLE_MS = 500L      // 후진 정지 후 관성 안정화 대기
-        private const val REFINE_HIGHLIGHT_MS = 1500L  // 정제(placeholder) 하이라이트 유지 시간
+        /** 저장 시 중앙 확대 배율(중앙 1/SAVE_ZOOM 영역을 크롭). */
+        private const val SAVE_ZOOM = 1.4f
         // 로그의 거리 환산용(실제 이동속도는 DroneMover.SCAN_SPEED). m/s.
         private const val SCAN_SPEED_LOG = 0.3
-        // ── 세부조정(NIMA 방향 루프) ─────────────────────────────────────────
-        // 각 단계 최대 반복 횟수. 부호 검증 완료 → 스펙대로 5회.
-        private const val MAX_ADJUST_STEPS = 5
-        // 이 점수(center/best) 이상이면 목표 달성으로 보고 멈춤.
-        private const val TARGET_SCORE = 6.0
-        // 줌(전후진) 최대 반복 횟수. 부호 검증 완료 → 스펙대로 5회.
-        private const val MAX_ZOOM_STEPS = 5
+        // ── 세부조정(detail-refine + 30cm 스캔) ──────────────────────────────
+        /** 세부조정 후진 거리 (m). detail-refine 전 화면 넓히기용. */
+        private const val DETAIL_BACKUP_M = 0.5
         // ── 틸트 sweep ───────────────────────────────────────────────────────
         private const val TILT_AMPLITUDE_DEG = 10.0    // base ± 10°
         private const val TILT_NUM_FRAMES = 11         // 캡처 프레임 수(대략 2° 간격)
@@ -159,10 +156,13 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private val scanFrames = java.util.Collections.synchronizedList(mutableListOf<ScanFrame>())
     // 정점 복귀 완료 후 검증 촬영 대기(다음 프레임에서 1장 잡아 /scan-result 전송). null 이면 대기 없음.
     @Volatile private var scanResultPending: ScanResultMeta? = null
+    // 스캔 재사용: 구도(2m)와 세부(30cm)가 같은 스캔 로직을 씀. 스캔 시작 전에 세팅.
+    @Volatile private var scanIsDetail = false                        // true = 세부(30cm) 스캔
+    @Volatile private var scanDurationMs = DroneMover.SCAN_TIME_MS    // 스캔 이동 시간(거리)
+    @Volatile private var detailTargetJpeg: ByteArray? = null         // /detail-refine target_image(스캔 진입 게이트)
 
-    // ── 세부조정(NIMA 방향 루프, drone only) ───────────────────────────────
-    private val adjustBusy = AtomicBoolean(false)        // 루프 진행 중(버튼 잠금/중복 방지)
-    @Volatile private var adjustCancelled = false        // 비상정지 등으로 취소됨
+    // ── 세부조정(detail-refine + 30cm 스캔, drone only) ─────────────────────
+    @Volatile private var adjustCancelled = false        // 비상정지 등으로 취소됨(틸트/세부 공용)
     // 현재 프레임 1장을 다음 프레임에서 잡아 JPEG 로 넘겨받기 위한 요청(1회성).
     @Volatile private var adjustFrameReq: CompletableDeferred<ByteArray>? = null
 
@@ -303,7 +303,11 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
         btnPipelineDownload.setOnClickListener {
             val bmp = pipelineResultBitmap
             if (bmp == null) Toast.makeText(this, "저장할 화면이 없습니다", Toast.LENGTH_SHORT).show()
-            else Toast.makeText(this, if (saveBitmapToGallery(bmp)) "완료" else "저장 실패", Toast.LENGTH_SHORT).show()
+            else {
+                // 저장 시 중앙을 1.4배 확대(= 중앙 1/1.4 영역 크롭)한 이미지로 저장.
+                val cropped = centerCropZoom(bmp, SAVE_ZOOM)
+                Toast.makeText(this, if (saveBitmapToGallery(cropped)) "완료" else "저장 실패", Toast.LENGTH_SHORT).show()
+            }
             hidePipelineOverlay()
         }
 
@@ -367,9 +371,8 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 scanResultPending = null
                 mainHandler.removeCallbacks(scanResultTimeout)
                 scanBusy.set(false)
-                // 세부조정 취소 (진행 중 moveAdjust 는 emergencyStop 의 aborted 로 중단됨)
+                // 세부조정 취소 (진행 중 이동은 emergencyStop 의 aborted 로 중단됨)
                 adjustCancelled = true
-                adjustBusy.set(false)
                 setAdjustBusy(false)
                 // 틸트 sweep 취소 (진행 중이면 루프가 tiltCancelled 로 빠져나와 짐벌 base 복귀).
                 tiltCancelled = true
@@ -1061,7 +1064,7 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private fun onScanClicked() {
         if (!scanBusy.compareAndSet(false, true)) return
         val off = lastDroneOffset
-        val target = bestImageJpeg
+        val target = if (scanIsDetail) detailTargetJpeg else bestImageJpeg
         val ds = frameSource as? DroneFrameSource
         val mover = droneMover
         if (off == null || target == null) {
@@ -1080,11 +1083,11 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
         scanStartMs = System.currentTimeMillis()
         scanNextCaptureMs = scanStartMs      // t=0 프레임부터 캡처
         capturing = true
-        Log.d(TAG, "스캔 시작: 방향 dx=${off.dx} dy=${off.dy}, 목표 ${DroneMover.SCAN_TIME_MS / 1000.0}초")
+        Log.d(TAG, "스캔 시작(${if (scanIsDetail) "세부" else "구도"}): 방향 dx=${off.dx} dy=${off.dy}, 목표 ${scanDurationMs / 1000.0}초")
         mover.moveScan(
             dx = off.dx,
             dy = off.dy,
-            durationMs = DroneMover.SCAN_TIME_MS,
+            durationMs = scanDurationMs,
             connected = ds.isConnected(),
             flying = ds.isFlying(),
             gpsLevel = ds.gpsLevel()
@@ -1116,7 +1119,7 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 scanReachedPeak = true   // 정점 확보 → 구도 단계 성공(파이프라인 다음 단계 진행)
                 val idx = peakIndex.coerceIn(0, frames.size - 1)
                 val peakTime = frames.getOrNull(idx)?.elapsedSec ?: (idx * SCAN_FRAME_INTERVAL_S)
-                val scanTimeS = DroneMover.SCAN_TIME_MS / 1000.0
+                val scanTimeS = scanDurationMs / 1000.0
                 val returnS = (scanTimeS - peakTime).coerceAtLeast(0.0)
                 val returnMs = (returnS * 1000).toLong()
                 Log.d(TAG, "scan-peak peak_index=$peakIndex → 정점=${idx}번(peakTime=%.2fs=%.2fm), 되돌아갈 %.2fm/%.2fs"
@@ -1155,10 +1158,12 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
     /** 스캔 종료 정리(성공/실패/취소 공통). 메인 스레드. */
     private fun finishScan() {
         val wasCancelled = scanCancelled   // 아래에서 리셋되기 전에 보관
+        val wasDetail = scanIsDetail       // 세부 스캔이었는지(분기용)
         capturing = false
         scanResultPending = null
         mainHandler.removeCallbacks(scanResultTimeout)
         scanCancelled = false
+        scanIsDetail = false
         scanBusy.set(false)
         setScanBusy(false)
         // 이동으로 offset 이 낡음 → 재촬영해야 다시 스캔 가능.
@@ -1167,12 +1172,17 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
         if (pipelineActive) {
             when {
                 wasCancelled -> { /* 비상정지 경로가 오버레이 정리까지 담당 → 여기선 아무것도 안 함 */ }
+                scanReachedPeak && wasDetail -> {
+                    // 세부(30cm) 스캔 완료 → 정제(4단계): 틸트 → 자동초점 → final-shot.
+                    pipelineFinishRefine()
+                }
                 scanReachedPeak -> {
+                    // 구도(2m) 스캔 완료 → 세부조정 시작(0.5m 후진 → detail-refine → 30cm 스캔).
                     setPipelineStage(2)
                     Toast.makeText(this, "세부 조정 시작", Toast.LENGTH_SHORT).show()
-                    onAdjustClicked()   // 세부조정 자동 시작
+                    ioScope.launch { runDetailRefine() }
                 }
-                else -> pipelineAbort("구도(스캔) 실패")
+                else -> pipelineAbort(if (wasDetail) "세부(스캔) 실패" else "구도(스캔) 실패")
             }
         } else if (droneConnected) {
             // 수동(legacy): 스캔 완료 → 세부조정 버튼 활성.
@@ -1260,7 +1270,7 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
         btnScan.alpha = if (enabled) 1f else 0.4f
     }
 
-    // ── 세부조정 (NIMA 방향 루프, drone only) ───────────────────────────────
+    // ── 세부조정 버튼 상태(레거시, drone only) ─────────────────────────────
 
     /** 세부조정 버튼 활성/비활성 토글 (비활성=회색). 메인 스레드. */
     private fun setAdjustEnabled(enabled: Boolean) {
@@ -1280,83 +1290,12 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
         }
     }
 
-    /**
-     * 서버 best_direction 문자열 → 화면좌표 이동벡터(dx 오른쪽+, dy 아래+).
-     * DroneMover 가 up=throttle+, right=lateral+ 로 변환(up=dy-1, right=dx+1).
-     * 대각선은 (±1,±1) → DroneMover 가 정규화해 성분에 속도 분배(총 크기 일정).
-     * 알 수 없는 문자열이면 null.
-     */
-    private fun dirToVec(dir: String): Pair<Double, Double>? = when (dir.trim().lowercase()) {
-        "up"         -> 0.0 to -1.0
-        "down"       -> 0.0 to 1.0
-        "left"       -> -1.0 to 0.0
-        "right"      -> 1.0 to 0.0
-        "up-left"    -> -1.0 to -1.0
-        "up-right"   -> 1.0 to -1.0
-        "down-left"  -> -1.0 to 1.0
-        "down-right" -> 1.0 to 1.0
-        "center"     -> 0.0 to 0.0
-        else -> null
-    }
-
-    /** 로그용 한글 방향 라벨. */
-    private fun dirLabel(dir: String): String = when (dir.trim().lowercase()) {
-        "up" -> "위"; "down" -> "아래"; "left" -> "왼쪽"; "right" -> "오른쪽"
-        "up-left" -> "왼쪽위"; "up-right" -> "오른쪽위"
-        "down-left" -> "왼쪽아래"; "down-right" -> "오른쪽아래"
-        else -> dir
-    }
-
-    /** /nima-lateral 응답 파싱 결과. */
-    private data class NimaDir(
-        val bestDirection: String,
-        val isCenterBest: Boolean,
-        val bestScore: Double,
-        val centerScore: Double
-    )
-
     /** 요청 시 다음 프레임 1장을 640 JPEG 로 받아온다(timeout 내 못 받으면 null). */
     private suspend fun grabCurrentJpeg(timeoutMs: Long = 2000): ByteArray? =
         withTimeoutOrNull(timeoutMs) {
             val def = CompletableDeferred<ByteArray>()
             adjustFrameReq = def
             def.await()
-        }
-
-    /** 현재 프레임 JPEG 을 /nima-lateral 로 보내 방향/점수를 받는다(실패 시 null). */
-    private fun sendNimaDirections(jpeg: ByteArray): NimaDir? {
-        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
-            .addFormDataPart("image", "frame.jpg", jpeg.toRequestBody("image/jpeg".toMediaType()))
-            .addFormDataPart("targets", buildTargetsJson())   // 선택 객체 좌표(추적 중인 최신 박스)
-            .withSession()
-            .build()
-        val req = Request.Builder().url("$SERVER_BASE/nima-lateral").post(body).build()
-        // 9방향 평가라 느릴 수 있어 넉넉한 captureHttpClient 사용.
-        captureHttpClient.newCall(req).execute().use { resp ->
-            val s = resp.body?.string()
-            if (!resp.isSuccessful || s.isNullOrBlank()) {
-                Log.e(TAG, "nima-lateral 실패 code=${resp.code}")
-                return null
-            }
-            val o = JSONObject(s)
-            return NimaDir(
-                bestDirection = o.optString("best_direction", "center"),
-                isCenterBest = o.optBoolean("is_center_best", false),
-                bestScore = o.optDouble("best_score", 0.0),
-                centerScore = o.optDouble("center_score", 0.0)
-            )
-        }
-    }
-
-    /** moveAdjust 콜백을 suspend 로 래핑. moved(스틱 명령 전송 여부) 반환. */
-    private suspend fun moveAdjustSuspend(dx: Double, dy: Double): Boolean =
-        suspendCancellableCoroutine { cont ->
-            val ds = frameSource as? DroneFrameSource
-            val mover = droneMover
-            if (ds == null || mover == null) { cont.resume(false); return@suspendCancellableCoroutine }
-            mover.moveAdjust(dx, dy, ds.isConnected(), ds.isFlying(), ds.gpsLevel()) { moved ->
-                if (cont.isActive) cont.resume(moved)
-            }
         }
 
     /** "짐벌 테스트" 버튼 → 이륙 없이 짐벌 pitch 검증 시퀀스 실행(로그로 명령/실제각 비교). */
@@ -1626,21 +1565,6 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
         tvFinalCaption.visibility = View.VISIBLE
     }
 
-    /** "세부조정" 버튼 → NIMA 방향 루프 시작. */
-    private fun onAdjustClicked() {
-        val ds = frameSource as? DroneFrameSource ?: return
-        if (!ds.isConnected()) { Toast.makeText(this, "드론이 연결되지 않았습니다", Toast.LENGTH_SHORT).show(); return }
-        if (!ds.isFlying())    { Toast.makeText(this, "이륙(비행) 상태에서만 세부조정", Toast.LENGTH_SHORT).show(); return }
-        if (!adjustBusy.compareAndSet(false, true)) return
-        adjustCancelled = false
-        setAdjustBusy(true)
-        ioScope.launch { runFineAdjustAll() }
-    }
-
-    /**
-     * 세부조정 오케스트레이터: 1단계(9방향) → (취소 아니면) 2단계(줌) 자동 연결.
-     * busy/버튼 리셋·최종 토스트는 여기서만. 각 단계는 종료 사유 문자열만 반환.
-     */
     /** 세부조정 진행 토스트 참조. 다음 단계 토스트가 이전 걸 즉시 교체하도록 보관. */
     private var adjustToast: Toast? = null
 
@@ -1656,208 +1580,103 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
         }
     }
 
-    private suspend fun runFineAdjustAll() {
-        var finalReason = ""
-        var tiltFailReason: String? = null
-        try {
-            val dirReason = runDirectionAdjust()               // 1단계
-            Log.d(TAG, "9방향 조정 종료: $dirReason")
-            if (adjustCancelled) { finalReason = "비상정지"; return }
-            Log.d(TAG, "9방향 조정 완료, 전후진 조정 시작")
-            showAdjustToast("세부조정 : 상하좌우 종료 ($dirReason)")
-            delay(1000)                                        // 종료 토스트 잠깐 노출 후 전후진
-            val zoomReason = runZoomAdjust()                   // 2단계
-            if (adjustCancelled) { finalReason = "비상정지"; return }
-            showAdjustToast("세부조정 : 전/후진 종료 ($zoomReason)")
-            delay(1000)                                        // 종료 토스트 잠깐 노출 후 틸트
-            // 3단계: 짐벌 틸트 sweep + 최적각 이동 (파이프라인에서만).
-            if (pipelineActive) {
-                showAdjustToast("세부 조정: 틸트 sweep 중")
-                tiltFailReason = runTiltPeak()
-                if (adjustCancelled) { finalReason = "비상정지"; return }
-            }
-            val tiltStr = when {
-                !pipelineActive -> ""
-                tiltFailReason == null -> " → 틸트(완료)"
-                else -> " → 틸트($tiltFailReason)"
-            }
-            finalReason = "9방향($dirReason) → 전후진($zoomReason)$tiltStr"
-        } catch (e: Exception) {
-            Log.e(TAG, "fine-adjust error: $e"); finalReason = "오류: ${e.message}"
-        } finally {
-            adjustFrameReq = null
-            tiltFrameReq = null
-            withContext(NonCancellable + Dispatchers.Main) {
-                adjustBusy.set(false)
-                setAdjustBusy(false)
-                Log.d(TAG, "세부조정 전체 완료(9방향 → 전후진 → 틸트): $finalReason")
-                if (pipelineActive) {
-                    when {
-                        adjustCancelled -> { /* 비상정지 경로가 오버레이 정리 담당 */ }
-                        else -> {
-                            // 틸트가 실패해도 파이프라인은 중단하지 않고 정제/저장 단계까지 진행한다.
-                            // (실내/짐벌/서버 이슈로 틸트만 실패해도 최종 저장 흐름은 완료되도록)
-                            if (tiltFailReason != null) {
-                                Log.w(TAG, "틸트 실패했지만 파이프라인 계속 진행 → 정제: $tiltFailReason")
-                            }
-                            // 세부(9방향+전후진+틸트) 완료 → 마무리(자동초점+최종 촬영) 진행.
-                            // '완료' 박스는 마무리까지 끝난 시점(pipelineFinishRefine)에 켠다.
-                            // 틸트 종료 토스트는 상세(finalReason) 없이 "세부조정 완료"만. (상세는 위 Log 참고)
-                            adjustToast?.cancel()   // 직전 틸트 토스트를 즉시 교체
-                            Toast.makeText(this@CameraActivity, "세부조정 완료", Toast.LENGTH_SHORT).show()
-                            // 세부 박스는 마무리(자동초점+최종 촬영)까지 계속 '세부 조정중...' 활성 유지.
-                            // '완료'로 넘어가는 건 pipelineFinishRefine 의 setPipelineStage(3) 시점(틸트+마무리 끝).
-                            mainHandler.postDelayed({ pipelineFinishRefine() }, REFINE_HIGHLIGHT_MS)
-                        }
-                    }
-                } else {
-                    // 수동(legacy): 세부조정 완료 → 틸트 버튼 활성.
-                    adjustToast?.cancel()   // 직전 진행 토스트를 즉시 교체
-                    Toast.makeText(this@CameraActivity, "세부조정 완료", Toast.LENGTH_SHORT).show()
-                    if (droneConnected && !adjustCancelled) setTiltEnabled(true)
-                }
-            }
-        }
-    }
-
-    /**
-     * 1단계: 9방향 조정 루프. 현재 프레임 → /nima-lateral → 종료판단 → 5cm 저속 이동,
-     * 최대 MAX_ADJUST_STEPS. 종료 사유 문자열만 반환(busy/toast 는 오케스트레이터 담당).
-     * 종료: 중앙 최고 / center≥목표 / best≥목표(이동 후 정지) / 최대 횟수 / 비상정지·차단·오류.
-     */
-    private suspend fun runDirectionAdjust(): String {
-        var step = 0
-        try {
-            while (true) {
-                if (adjustCancelled) return "비상정지"
-
-                focusCenterAndSettle()   // 촬영 전 중앙 자동초점(상하좌우 판정 프레임 선명하게)
-                val jpeg = grabCurrentJpeg() ?: return "프레임 획득 실패"
-                val r = sendNimaDirections(jpeg) ?: return "방향 요청 실패"
-
-                // a) 중앙이 최고 → 이동 없이 멈춤
-                if (r.isCenterBest) return "중앙 최고 (이미 최적 구도)"
-                // b) 현재(중앙)가 이미 목표 점수 → 이동 없이 멈춤
-                if (r.centerScore >= TARGET_SCORE) return "목표 점수 도달"
-
-                val vec = dirToVec(r.bestDirection) ?: return "알 수 없는 방향(${r.bestDirection})"
-
-                Log.d(
-                    TAG,
-                    "adjust ${step + 1}/$MAX_ADJUST_STEPS: best=${r.bestDirection}(%.1f) center=%.1f → %s 5cm 이동"
-                        .format(r.bestScore, r.centerScore, dirLabel(r.bestDirection))
-                )
-                showAdjustToast("세부조정중 : 상하좌우 ${step + 1}/$MAX_ADJUST_STEPS")
-
-                val moved = moveAdjustSuspend(vec.first, vec.second)
-                step++
-                if (!moved) return "이동 차단됨(게이트)"
-
-                // c) 다른 방향이 이미 목표 점수 → 그 방향 이동 후 멈춤
-                if (r.bestScore >= TARGET_SCORE) return "목표 방향 도달 후 정지"
-                // 3) 최대 횟수 상한
-                if (step >= MAX_ADJUST_STEPS) return "최대 횟수 도달"
-                // d) 아니면 계속 반복
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "direction adjust error: $e")
-            return "오류: ${e.message}"
-        }
-    }
-
-    // ── 세부조정 2단계: 줌(전후진) ─────────────────────────────────────────
-
-    /** /nima-depth 응답. bestZoom 은 첫 회차(direction 없이 요청)에서만 유효. */
-    private data class NimaZoom(
-        val bestZoom: String,       // "stay" | "forward" | "backward"
-        val improved: Boolean,
-        val zoomScore: Double,      // 후보 방향 점수(로그용)
-        val currentScore: Double    // 현재 점수(로그용)
+    /** /detail-refine 응답. best_crop 없으면 bestCropNull=true. */
+    private data class DetailRefine(
+        val dx: Double,
+        val dy: Double,
+        val thetaDeg: Double,
+        val targetImage: ByteArray?,   // 최종 crop(base64 디코딩). 스캔 SSIM target 용(서버가 session 으로 사용).
+        val bestCropNull: Boolean
     )
 
-    private fun zoomLabel(dir: String): String = when (dir) {
-        "forward" -> "전진"; "backward" -> "후진"; else -> dir
-    }
+    /**
+     * 새 세부조정: 0.5m 후진 → /detail-refine 1회 → theta 방향 30cm 스캔(SSIM 정점).
+     * finishScan 의 구도-완료 분기에서 ioScope 로 호출. 실패는 pipelineAbort.
+     */
+    private suspend fun runDetailRefine() {
+        try {
+            if (!pipelineActive || adjustCancelled) return
+            // ① 0.5m 후진
+            Log.d(TAG, "세부조정 ①: 0.5m 후진 시작")
+            showAdjustToast("세부 조정: 0.5m 후진")
+            val backedUp = moveBackupSuspend(DETAIL_BACKUP_M)
+            Log.d(TAG, "세부조정 ①: 후진 결과 moved=$backedUp")
+            if (!pipelineActive || adjustCancelled) return
+            if (!backedUp) { pipelineAbortMain("세부 조정: 후진 실패"); return }
+            delay(BACKUP_SETTLE_MS)   // 관성 안정화
 
-    /** 현재 프레임 + (2회차부터) direction 을 /nima-depth 로 전송(실패 시 null). */
-    private fun sendNimaZoom(jpeg: ByteArray, direction: String?): NimaZoom? {
-        val b = MultipartBody.Builder().setType(MultipartBody.FORM)
-            .addFormDataPart("image", "frame.jpg", jpeg.toRequestBody("image/jpeg".toMediaType()))
-            .addFormDataPart("targets", buildTargetsJson())   // 선택 객체 좌표(추적 중인 최신 박스)
-        if (direction != null) b.addFormDataPart("direction", direction)
-        val req = Request.Builder().url("$SERVER_BASE/nima-depth").post(b.withSession().build()).build()
-        captureHttpClient.newCall(req).execute().use { resp ->
-            val s = resp.body?.string()
-            if (!resp.isSuccessful || s.isNullOrBlank()) {
-                Log.e(TAG, "nima-depth 실패 code=${resp.code}")
-                return null
+            // ② 후진 후 프레임 → /detail-refine
+            Log.d(TAG, "세부조정 ②: 프레임 grab → /detail-refine")
+            showAdjustToast("세부 조정: 구도 분석 중")
+            val jpeg = grabCurrentJpeg()
+            if (jpeg == null) { pipelineAbortMain("세부 조정: 프레임 실패"); return }
+            val dr = sendDetailRefine(jpeg)
+            if (!pipelineActive || adjustCancelled) return
+            if (dr == null) { pipelineAbortMain("세부 조정: 분석 실패"); return }
+            if (dr.bestCropNull) { pipelineAbortMain("세부 조정: 후보 없음"); return }
+            detailTargetJpeg = dr.targetImage   // 스캔 진입 게이트(서버는 session 의 target 으로 SSIM)
+            if (detailTargetJpeg == null) { pipelineAbortMain("세부 조정: target 없음"); return }
+
+            // ③ theta(dx,dy) 방향으로 30cm 스캔 → 정점 이동 (기존 스캔 재사용)
+            Log.d(TAG, "세부조정 ③: 30cm 스캔 시작")
+            withContext(Dispatchers.Main) {
+                if (!pipelineActive || adjustCancelled) return@withContext
+                showAdjustToast("세부 조정: 30cm 스캔")
+                lastDroneOffset = DroneOffset(dr.dx, dr.dy, 0.0, 0.0, dr.thetaDeg)
+                scanIsDetail = true
+                scanDurationMs = DroneMover.SCAN_TIME_DETAIL_MS
+                onScanClicked()   // 완료 시 finishScan 의 세부 분기 → pipelineFinishRefine(틸트+마무리)
             }
-            val o = JSONObject(s)
-            return NimaZoom(
-                bestZoom = o.optString("best_zoom", "stay"),
-                improved = o.optBoolean("improved", false),
-                zoomScore = o.optDouble("zoom_score", 0.0),
-                currentScore = o.optDouble("current_score", 0.0)
-            )
+        } catch (e: Exception) {
+            Log.e(TAG, "detail-refine error: $e")
+            pipelineAbortMain("세부 조정: 오류(${e.message})")
         }
     }
 
-    /** moveZoom 콜백을 suspend 로 래핑. moved(스틱 명령 전송 여부) 반환. */
-    private suspend fun moveZoomSuspend(forward: Boolean): Boolean =
+    /** pipelineAbort 를 메인 스레드에서 안전 호출(백그라운드 코루틴용). */
+    private suspend fun pipelineAbortMain(reason: String) {
+        withContext(Dispatchers.Main) { if (pipelineActive) pipelineAbort(reason) }
+    }
+
+    /** moveBackup 콜백을 suspend 로 래핑. distanceM 만큼 후진, moved 반환. */
+    private suspend fun moveBackupSuspend(distanceM: Double): Boolean =
         suspendCancellableCoroutine { cont ->
             val ds = frameSource as? DroneFrameSource
             val mover = droneMover
             if (ds == null || mover == null) { cont.resume(false); return@suspendCancellableCoroutine }
-            mover.moveZoom(forward, ds.isConnected(), ds.isFlying(), ds.gpsLevel()) { moved ->
+            mover.moveBackup(ds.isConnected(), ds.isFlying(), ds.gpsLevel(), distanceM) { moved ->
                 if (cont.isActive) cont.resume(moved)
             }
         }
 
-    /**
-     * 2단계: 줌(전후진) 조정 루프. 첫 회차에 방향 확정(stay 면 멈춤), 이후 improved 동안 반복,
-     * 최대 MAX_ZOOM_STEPS. 종료 사유 문자열 반환.
-     */
-    private suspend fun runZoomAdjust(): String {
-        var step = 0
-        var confirmedZoomDir: String? = null    // 첫 회차에 forward/backward 확정
-        try {
-            while (true) {
-                if (adjustCancelled) return "비상정지"
-
-                focusCenterAndSettle()   // 촬영 전 중앙 자동초점(전후진 판정 프레임 선명하게)
-                val jpeg = grabCurrentJpeg() ?: return "프레임 획득 실패"
-                // /nima-depth 평가마다 표시 — 서버가 stay 라 이동 없이 끝나도 호출됐음을 알림.
-                showAdjustToast("세부조정중 : 전/후진 ${step + 1}/$MAX_ZOOM_STEPS")
-                val r = sendNimaZoom(jpeg, confirmedZoomDir) ?: return "전후진 방향 요청 실패"
-
-                if (confirmedZoomDir == null) {
-                    // 첫 회차: 방향 확정
-                    if (r.bestZoom == "stay") return "전후진 유지 (이동 없음)"
-                    if (r.bestZoom != "forward" && r.bestZoom != "backward") {
-                        return "알 수 없는 전후진 방향(${r.bestZoom})"
-                    }
-                    confirmedZoomDir = r.bestZoom
-                    if (!r.improved) return "개선 없음"     // 방향은 있으나 개선 아니면 멈춤
-                } else {
-                    // 2~5회차
-                    if (!r.improved) return "개선 없음"
-                }
-
-                val dir = confirmedZoomDir!!
-                val forward = dir == "forward"
-                Log.d(
-                    TAG,
-                    "zoom ${step + 1}/$MAX_ZOOM_STEPS: dir=$dir zoom_in=%.1f current=%.1f → %s 5cm"
-                        .format(r.zoomScore, r.currentScore, zoomLabel(dir))
-                )
-                val moved = moveZoomSuspend(forward)
-                step++
-                if (!moved) return "이동 차단됨(게이트)"
-                if (step >= MAX_ZOOM_STEPS) return "최대 횟수 도달"
+    /** 후진 후 프레임 + targets 를 /detail-refine 로 전송. dx/dy/theta_deg/target_image/best_crop 파싱. */
+    private fun sendDetailRefine(jpeg: ByteArray): DetailRefine? {
+        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("image", "detail.jpg", jpeg.toRequestBody("image/jpeg".toMediaType()))
+            .addFormDataPart("targets", buildTargetsJson())
+            .withSession()
+            .build()
+        val req = Request.Builder().url("$SERVER_BASE/detail-refine").post(body).build()
+        captureHttpClient.newCall(req).execute().use { resp ->
+            val s = resp.body?.string()
+            if (!resp.isSuccessful || s.isNullOrBlank()) {
+                Log.e(TAG, "detail-refine 실패 code=${resp.code}")
+                return null
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "zoom adjust error: $e")
-            return "오류: ${e.message}"
+            val o = JSONObject(s)
+            val bestCropNull = !o.has("best_crop") || o.isNull("best_crop")
+            val targetImg = o.optString("target_image", "").takeIf { it.isNotBlank() }?.let {
+                try { android.util.Base64.decode(it, android.util.Base64.DEFAULT) }
+                catch (e: Exception) { Log.e(TAG, "detail target_image 디코딩 실패: $e"); null }
+            }
+            Log.d(TAG, "detail-refine: dx=${o.optDouble("dx",0.0)} dy=${o.optDouble("dy",0.0)} theta=${o.optDouble("theta_deg",0.0)} best_crop=${!bestCropNull} target=${targetImg?.size ?: 0}B")
+            return DetailRefine(
+                dx = o.optDouble("dx", 0.0),
+                dy = o.optDouble("dy", 0.0),
+                thetaDeg = o.optDouble("theta_deg", 0.0),
+                targetImage = targetImg,
+                bestCropNull = bestCropNull
+            )
         }
     }
 
@@ -1905,6 +1724,12 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
     /** 촬영 시작 → 오버레이 표시 + ① 후진 전 최초 사진 캡처 → ② 그 다음 후진 시작. */
     private fun startPipeline() {
         pipelineActive = true
+        // ★ 직전 실행에서 정지/중단으로 세팅된 취소 플래그를 반드시 초기화.
+        //   안 하면 stale 한 adjustCancelled=true 때문에 runDetailRefine 첫 가드에서
+        //   조용히 리턴 → 세부조정 단계에서 진행도 abort 도 없이 멈춘 것처럼 보인다.
+        adjustCancelled = false
+        scanCancelled = false
+        tiltCancelled = false
         llPipelineEnd.visibility = View.GONE
         pipelineOverlay.visibility = View.VISIBLE
         setPipelineStage(0)
@@ -1945,6 +1770,13 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
         if (!pipelineActive) return
         // 세부 박스 점 애니는 여기서 멈추지 않는다 — 마무리 끝에 setPipelineStage(3)가 완료(✅)로 전환하며 정지.
         ioScope.launch {
+            // 0. 정제(4단계): 짐벌 틸트 sweep + 최적각 이동. 실패해도 자동초점/저장은 계속.
+            if (pipelineActive && !adjustCancelled) {
+                showAdjustToast("정제: 틸트 sweep 중")
+                val tiltFail = runTiltPeak()
+                if (tiltFail != null) Log.w(TAG, "틸트 실패(무시하고 정제 계속): $tiltFail")
+            }
+            if (!pipelineActive || adjustCancelled) return@launch
             // 1. 화면 중앙 자동초점(best-effort) + 초점 안정화 대기.
             focusCenterAndSettle()
             // 2. 초점 맞은 최종 프레임 캡처 → 앨범 저장용 비트맵 + 서버 전송용 JPEG.
@@ -2051,6 +1883,19 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
         hidePipelineOverlay()
     }
 
+    /**
+     * 중앙을 [zoom]배 확대한(= 중앙 1/zoom 영역을 잘라낸) 비트맵 반환. 종횡비 유지.
+     * zoom<=1 이면 원본 그대로. 저장 시 중앙 크롭용.
+     */
+    private fun centerCropZoom(src: Bitmap, zoom: Float): Bitmap {
+        if (zoom <= 1f) return src
+        val cw = (src.width / zoom).toInt().coerceIn(1, src.width)
+        val ch = (src.height / zoom).toInt().coerceIn(1, src.height)
+        val x = (src.width - cw) / 2
+        val y = (src.height - ch) / 2
+        return Bitmap.createBitmap(src, x, y, cw, ch)
+    }
+
     /** 종료 시점 화면 비트맵을 폰 앨범(Pictures/Thirds)에 저장. 성공 여부 반환. */
     private fun saveBitmapToGallery(bmp: Bitmap): Boolean {
         val name = "thirds_${sessionId.ifEmpty { genSessionId() }}.jpg"
@@ -2143,6 +1988,8 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
                     if (response.isSuccessful && bestImageJpeg != null && lastDroneOffset != null) {
                         setPipelineStage(1)
                         Toast.makeText(this@CameraActivity, "구도 조정: 스캔 이동 중", Toast.LENGTH_SHORT).show()
+                        scanIsDetail = false                          // 구도(2m) 스캔
+                        scanDurationMs = DroneMover.SCAN_TIME_MS
                         onScanClicked()
                     } else {
                         pipelineAbort("촬영/구도 분석 실패")

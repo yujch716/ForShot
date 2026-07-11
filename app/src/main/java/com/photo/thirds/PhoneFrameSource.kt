@@ -84,7 +84,7 @@ class PhoneFrameSource(
     }
 
     fun bindToPreview(previewView: PreviewView) {
-        // COMPATIBLE(TextureView): 위에 얹은 오버레이(박스)·NIMA 점수 뱃지가 확실히 보이도록.
+        // COMPATIBLE(TextureView): 위에 얹은 오버레이(박스)가 확실히 보이도록.
         //   PERFORMANCE(SurfaceView)에선 별도 서피스라 위 뷰들이 가려질 수 있음.
         // FIT_CENTER: 프레임을 레터박스로 맞춰 표시 → OverlayView.setVideoAspect(fw/fh) 매핑과 정확히 일치.
         previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
