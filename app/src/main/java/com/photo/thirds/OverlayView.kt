@@ -156,13 +156,21 @@ class OverlayView @JvmOverloads constructor(
             canvas.drawRect(left, top, right, bottom, boxPaint)
 
             // 클래스명 라벨 (신뢰도 % 없이). 라벨 배경=박스색, 글씨=검정(밝은 색 위 대비).
+            // 박스 위쪽 '바깥'이 아니라 '외곽선 안쪽 왼쪽 위'에 붙여 그린다.
+            // → 박스가 화면 상단에 바짝 붙어도 라벨이 잘리지 않는다.
             val label = det.label
-            val textH = textPaint.textSize
+            val fm = textPaint.fontMetrics
             val textW = textPaint.measureText(label)
+            val inset = boxPaint.strokeWidth / 2f + 1f   // 외곽선 두께만큼 안쪽으로 들여쓰기
+            val padX = 4f; val padY = 2f
+            val bgLeft = left + inset
+            val bgTop = top + inset
+            val bgRight = (bgLeft + textW + padX * 2f).coerceAtMost(right)
+            val bgBottom = (bgTop + (fm.descent - fm.ascent) + padY * 2f).coerceAtMost(bottom)
             textBgPaint.color = boxColor
-            canvas.drawRect(left, top - textH - 4f, left + textW + 8f, top, textBgPaint)
+            canvas.drawRect(bgLeft, bgTop, bgRight, bgBottom, textBgPaint)
             textPaint.color = Color.BLACK
-            canvas.drawText(label, left + 4f, top - 4f, textPaint)
+            canvas.drawText(label, bgLeft + padX, bgTop + padY - fm.ascent, textPaint)
         }
     }
 

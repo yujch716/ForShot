@@ -75,7 +75,7 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
     companion object {
         private const val TAG = "ThirdsApp"
         private val SERVER_BASE get() = BuildConfig.AI_SERVER_URL
-        private const val FRAME_INTERVAL_MS = 300L
+        private const val FRAME_INTERVAL_MS = 150L
         private const val TARGET_WIDTH = 640
         private const val MATCH_THRESHOLD = 0.10f
         private const val MISS_LIMIT = 15
@@ -1507,6 +1507,10 @@ class CameraActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 s.jpeg.toRequestBody("image/jpeg".toMediaType()))
         }
         b.addFormDataPart("angles", JSONArray(shots.map { it.angle }).toString())
+        // 호출 시점의 선택된 객체 targets 동봉(다른 API와 동일 방식). 선택 없으면 빈 배열 "[]".
+        val targetsJson = buildTargetsJson()
+        b.addFormDataPart("targets", targetsJson)
+        Log.d(TAG, "tilt-peak 전송: frames=${shots.size} targets=$targetsJson")
         val req = Request.Builder().url("$SERVER_BASE/tilt-peak").post(b.withSession().build()).build()
         captureHttpClient.newCall(req).execute().use { resp ->
             val s = resp.body?.string()
